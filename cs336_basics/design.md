@@ -31,31 +31,17 @@ When several adjacent pairs share the maximum frequency, the tie is broken by ch
 
 ---
 
-## 3. Training algorithm (`train_bpe`)
+## Training algorithm
 
-```mermaid
-flowchart TD
-    read["Read corpus file (UTF-8)"] --> initVocab["Init vocab: 256 bytes + special tokens"]
-    read --> splitSpecial["Split on special tokens"]
-    splitSpecial --> pretok["GPT-2 regex pre-tokenization"]
-    pretok --> counts["Count pre-token frequencies<br/>(tuple of bytes -> count)"]
-    counts --> loop{"len(vocab) < vocab_size?"}
-    loop -->|yes| pairCount["Count adjacent byte-pair frequencies"]
-    pairCount --> pick["Pick most frequent pair<br/>(tie: lexicographically greatest)"]
-    pick --> apply["Add merged token to vocab + merges;<br/>rewrite all sequences"]
-    apply --> loop
-    loop -->|no| done["Return (vocab, merges)"]
-```
-
-### 3.1 Vocabulary initialization
+### Vocabulary initialization
 
 The base 256 byte tokens occupy IDs `0..255`; special tokens follow. Learned merges then occupy all subsequent IDs until `len(vocab) == vocab_size`.
 
-### 3.2 Frequency table
+### Frequency table
 
 Rather than operating on the full corpus, the algorithm operates on the set of **unique pre-tokens** plus their corpus frequencies. This is the central efficiency trick: identical pre-tokens (e.g. the thousands of occurrences of `" the"`) are processed once and weighted by their count.
 
-### 3.3 Merge loop
+### Merge loop
 
 Each iteration:
 
@@ -66,7 +52,7 @@ Each iteration:
 
 The loop stops when the vocabulary reaches `vocab_size`, or earlier if no pairs remain (`pair_counts` empty).
 
-### 3.4 Complexity & known limitations
+### Complexity & known limitations
 
 Let `V` = number of unique pre-tokens, `L` = average sequence length, `M` = number of merges (`vocab_size - 256 - num_special`), and `P` = number of distinct adjacent pairs currently present.
 
