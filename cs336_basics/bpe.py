@@ -66,15 +66,38 @@ def train_bpe(
 
     merges: list[tuple[bytes, bytes]] = []
 
-    def count_pairs() -> Counter[tuple[bytes, bytes]]:
-        pair_counts: Counter[tuple[bytes, bytes]] = Counter()
-        for seq, freq in zip(sequences, freqs):
-            for a, b in zip(seq, seq[1:]):
-                pair_counts[(a, b)] += freq
-        return pair_counts
+    # Incremental bookkeeping, built once and then updated in place:
+    #   pair_counts : adjacent byte-pair -> total (frequency-weighted) count
+    #   pair_to_seqs: adjacent byte-pair -> set of sequence indices containing it
+    # Each merge only touches the sequences that actually contain the chosen pair,
+    # so we avoid rescanning / rewriting the whole corpus every iteration.
+    pair_counts: Counter[tuple[bytes, bytes]] = Counter()
+    pair_to_seqs: dict[tuple[bytes, bytes], set[int]] = {}
+
+    def add_seq_pairs(idx: int) -> None:
+        seq = sequences[idx]
+        freq = freqs[idx]
+        for pair in zip(seq, seq[1:]):
+            pair_counts[pair] += freq
+            pair_to_seqs.setdefault(pair, set()).add(idx)
+
+    def remove_seq_pairs(idx: int) -> None:
+        seq = sequences[idx]
+        freq = freqs[idx]
+        for pair in zip(seq, seq[1:]):
+            pair_counts[pair] -= freq
+            if pair_counts[pair] <= 0:
+                del pair_counts[pair]
+            seqs = pair_to_seqs.get(pair)
+            if seqs is not None:
+                seqs.discard(idx)
+                if not seqs:
+                    del pair_to_seqs[pair]
+
+    for idx in range(len(sequences)):
+        add_seq_pairs(idx)
 
     while len(vocab) < vocab_size:
-        pair_counts = count_pairs()
         if not pair_counts:
             break
         # Most frequent pair; ties broken by lexicographically greatest pair.
@@ -83,10 +106,11 @@ def train_bpe(
         vocab[len(vocab)] = merged
         merges.append(best_pair)
 
-        # Apply the merge to every sequence.
-        for idx, seq in enumerate(sequences):
-            if len(seq) < 2:
-                continue
+        # Only the sequences containing best_pair can change. For each, drop its
+        # old pair contributions, rewrite it, then add the new pair contributions.
+        for idx in list(pair_to_seqs.get(best_pair, ())):
+            remove_seq_pairs(idx)
+            seq = sequences[idx]
             new_seq: list[bytes] = []
             i = 0
             while i < len(seq):
@@ -97,5 +121,6 @@ def train_bpe(
                     new_seq.append(seq[i])
                     i += 1
             sequences[idx] = new_seq
+            add_seq_pairs(idx)
 
     return vocab, merges
