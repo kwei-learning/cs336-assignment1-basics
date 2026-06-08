@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import heapq
 import os
 import regex as re
 from collections import Counter
+from multiprocessing import Pool
+
+from cs336_basics.pretokenization_example import find_chunk_boundaries
 
 # GPT-2 pre-tokenization pattern.
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -41,6 +45,78 @@ def _pretoken_counts(text: str, special_tokens: list[str]) -> Counter[tuple[byte
     return counts
 
 
+def _count_chunk(args: tuple[str, int, int, list[str]]) -> Counter[tuple[bytes, ...]]:
+    """Worker: pre-token counts for one [start, end) byte range of a file.
+
+    Top-level (picklable) so it can run in a multiprocessing pool. Boundaries are
+    aligned to a special token by ``find_chunk_boundaries`` so no pre-token is
+    split across a chunk edge; summing the per-chunk counters reproduces the
+    serial result exactly.
+    """
+    input_path, start, end, special_tokens = args
+    with open(input_path, "rb") as f:
+        f.seek(start)
+        chunk = f.read(end - start).decode("utf-8", errors="ignore")
+    return _pretoken_counts(chunk, special_tokens)
+
+
+def _parallel_pretoken_counts(
+    input_path: str | os.PathLike,
+    special_tokens: list[str],
+    num_procs: int | None = None,
+) -> Counter[tuple[bytes, ...]]:
+    """Pre-token counts over the whole file, parallelized across processes.
+
+    Falls back to a serial single-read path when parallelism would not help
+    (no special token to split on, a single core, or a tiny/non-chunkable file).
+    """
+    if num_procs is None:
+        num_procs = os.cpu_count() or 1
+
+    # We need a special token to find safe chunk boundaries; without one we can't
+    # guarantee a chunk edge doesn't fall inside a pre-token, so read serially.
+    split_token = special_tokens[0].encode("utf-8") if special_tokens else None
+    if num_procs <= 1 or split_token is None:
+        with open(input_path, encoding="utf-8") as f:
+            return _pretoken_counts(f.read(), special_tokens)
+
+    with open(input_path, "rb") as f:
+        boundaries = find_chunk_boundaries(f, num_procs, split_token)
+
+    # find_chunk_boundaries may collapse to fewer (or one) boundary pair.
+    chunk_args = [
+        (str(input_path), start, end, special_tokens)
+        for start, end in zip(boundaries[:-1], boundaries[1:])
+    ]
+    if len(chunk_args) <= 1:
+        return _count_chunk(chunk_args[0]) if chunk_args else Counter()
+
+    total: Counter[tuple[bytes, ...]] = Counter()
+    with Pool(min(num_procs, len(chunk_args))) as pool:
+        for partial in pool.map(_count_chunk, chunk_args):
+            total.update(partial)
+    return total
+
+
+class _HeapEntry:
+    """Heap entry ordered so the BPE-best pair pops first from a min-heap.
+
+    "Best" means highest count, ties broken by the lexicographically greatest
+    pair -- identical to ``max(pair_counts, key=lambda p: (pair_counts[p], p))``.
+    """
+
+    __slots__ = ("count", "pair")
+
+    def __init__(self, count: int, pair: tuple[bytes, bytes]) -> None:
+        self.count = count
+        self.pair = pair
+
+    def __lt__(self, other: "_HeapEntry") -> bool:
+        if self.count != other.count:
+            return self.count > other.count
+        return self.pair > other.pair
+
+
 def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
@@ -55,13 +131,9 @@ def train_bpe(
     for tok in special_tokens:
         vocab[len(vocab)] = tok.encode("utf-8")
 
-    with open(input_path, encoding="utf-8") as f:
-        text = f.read()
-
-    # print(text)
-    # print(special_tokens) -> ['<|endoftext|>']
-
-    pretoken_counts = _pretoken_counts(text, special_tokens)
+    # Pre-tokenization is the dominant cost on large corpora, so parallelize it
+    # across processes (boundaries aligned to a special token keep results exact).
+    pretoken_counts = _parallel_pretoken_counts(input_path, special_tokens)
     # print(pretoken_counts)
     # Sample output:
     # (b' ', b'h', b'o', b'm', b'e', b'w', b'o', b'r', b'k'): 5, the word homework appears 5 times as pre-token
@@ -77,8 +149,12 @@ def train_bpe(
     #   pair_to_seqs: adjacent byte-pair -> set of sequence indices containing it
     # Each merge only touches the sequences that actually contain the chosen pair,
     # so we avoid rescanning / rewriting the whole corpus every iteration.
+    # A lazy-deletion max-heap indexes pair_counts so we don't rescan every pair
+    # each merge. We push the current count on every change (stale entries are
+    # filtered on pop); pair_counts stays the source of truth.
     pair_counts: Counter[tuple[bytes, bytes]] = Counter()
     pair_to_seqs: dict[tuple[bytes, bytes], set[int]] = {}
+    heap: list[_HeapEntry] = []
 
     def add_seq_pairs(idx: int) -> None:
         seq = sequences[idx]
@@ -86,6 +162,7 @@ def train_bpe(
         for pair in zip(seq, seq[1:]):
             pair_counts[pair] += freq
             pair_to_seqs.setdefault(pair, set()).add(idx)
+            heapq.heappush(heap, _HeapEntry(pair_counts[pair], pair))
 
     def remove_seq_pairs(idx: int) -> None:
         seq = sequences[idx]
@@ -94,6 +171,8 @@ def train_bpe(
             pair_counts[pair] -= freq
             if pair_counts[pair] <= 0:
                 del pair_counts[pair]
+            else:
+                heapq.heappush(heap, _HeapEntry(pair_counts[pair], pair))
             seqs = pair_to_seqs.get(pair)
             if seqs is not None:
                 seqs.discard(idx)
@@ -104,10 +183,15 @@ def train_bpe(
         add_seq_pairs(idx)
 
     while len(vocab) < vocab_size:
-        if not pair_counts:
+        # Pop the best pair, discarding stale entries (count no longer current).
+        best_pair = None
+        while heap:
+            entry = heapq.heappop(heap)
+            if pair_counts.get(entry.pair) == entry.count:
+                best_pair = entry.pair
+                break
+        if best_pair is None:
             break
-        # Most frequent pair; ties broken by lexicographically greatest pair.
-        best_pair = max(pair_counts, key=lambda p: (pair_counts[p], p))
         merged = best_pair[0] + best_pair[1]
         vocab[len(vocab)] = merged
         merges.append(best_pair)
