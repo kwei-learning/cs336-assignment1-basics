@@ -25,13 +25,19 @@ def _pretoken_counts(text: str, special_tokens: list[str]) -> Counter[tuple[byte
     Special tokens are stripped out entirely (they never participate in merges).
     """
     special_set = set(special_tokens)
-    counts: Counter[tuple[bytes, ...]] = Counter()
+    # First count pre-tokens as strings. Identical pre-tokens (e.g. " the")
+    # collapse to a single key here, so we only build the byte-tuple once per
+    # unique pre-token below instead of once per occurrence.
+    str_counts: Counter[str] = Counter()
     for chunk in _split_on_special_tokens(text, special_tokens):
         if chunk == "" or chunk in special_set:
             continue
-        for match in _COMPILED_PAT.finditer(chunk):
-            token_bytes = match.group().encode("utf-8")
-            counts[tuple(bytes([b]) for b in token_bytes)] += 1
+        str_counts.update(match.group() for match in _COMPILED_PAT.finditer(chunk))
+
+    counts: Counter[tuple[bytes, ...]] = Counter()
+    for pretoken, c in str_counts.items():
+        token_bytes = pretoken.encode("utf-8")
+        counts[tuple(bytes([b]) for b in token_bytes)] += c
     return counts
 
 
