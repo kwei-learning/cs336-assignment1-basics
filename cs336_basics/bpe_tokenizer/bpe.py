@@ -25,13 +25,9 @@ def _split_on_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
 
 def _pretoken_counts(text: str, special_tokens: list[str]) -> Counter[tuple[bytes, ...]]:
     """Count pre-token frequencies, where each pre-token is a tuple of single-byte bytes.
-
     Special tokens are stripped out entirely (they never participate in merges).
     """
     special_set = set(special_tokens)
-    # First count pre-tokens as strings. Identical pre-tokens (e.g. " the")
-    # collapse to a single key here, so we only build the byte-tuple once per
-    # unique pre-token below instead of once per occurrence.
     str_counts: Counter[str] = Counter()
     for chunk in _split_on_special_tokens(text, special_tokens):
         if chunk == "" or chunk in special_set:
@@ -143,15 +139,6 @@ def train_bpe(
     freqs: list[int] = list(pretoken_counts.values())
 
     merges: list[tuple[bytes, bytes]] = []
-
-    # Incremental bookkeeping, built once and then updated in place:
-    #   pair_counts : adjacent byte-pair -> total (frequency-weighted) count
-    #   pair_to_seqs: adjacent byte-pair -> set of sequence indices containing it
-    # Each merge only touches the sequences that actually contain the chosen pair,
-    # so we avoid rescanning / rewriting the whole corpus every iteration.
-    # A lazy-deletion max-heap indexes pair_counts so we don't rescan every pair
-    # each merge. We push the current count on every change (stale entries are
-    # filtered on pop); pair_counts stays the source of truth.
     pair_counts: Counter[tuple[bytes, bytes]] = Counter()
     pair_to_seqs: dict[tuple[bytes, bytes], set[int]] = {}
     heap: list[_HeapEntry] = []
