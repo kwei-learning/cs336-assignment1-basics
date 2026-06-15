@@ -42,13 +42,6 @@ def _pretoken_counts(text: str, special_tokens: list[str]) -> Counter[tuple[byte
 
 
 def _count_chunk(args: tuple[str, int, int, list[str]]) -> Counter[tuple[bytes, ...]]:
-    """Worker: pre-token counts for one [start, end) byte range of a file.
-
-    Top-level (picklable) so it can run in a multiprocessing pool. Boundaries are
-    aligned to a special token by ``find_chunk_boundaries`` so no pre-token is
-    split across a chunk edge; summing the per-chunk counters reproduces the
-    serial result exactly.
-    """
     input_path, start, end, special_tokens = args
     with open(input_path, "rb") as f:
         f.seek(start)
