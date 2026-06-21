@@ -53,12 +53,6 @@ class Tokenizer:
         merges_filepath: str | os.PathLike,
         special_tokens: list[str] | None = None,
     ) -> "Tokenizer":
-        """Construct a Tokenizer from a serialized vocab (JSON) and merges (txt).
-
-        The vocab JSON maps token strings to ids; the merges file has one
-        space-separated pair per line. Both use the bytes' direct utf-8 decoding
-        as written by our own training output.
-        """
         with open(vocab_filepath, encoding="utf-8") as f:
             raw_vocab = json.load(f)
         vocab = {int(idx): token.encode("utf-8") for token, idx in raw_vocab.items()}
@@ -112,11 +106,7 @@ class Tokenizer:
         return ids
 
     def encode_iterable(self, iterable: Iterable[str]) -> Iterator[int]:
-        """Lazily encode an iterable of strings (e.g. a file handle).
-
-        Yields token ids one at a time so we never hold the whole corpus in
-        memory.
-        """
+        """Lazily encode an iterable of strings (e.g. a file handle)."""
         for piece in iterable:
             yield from self.encode(piece)
 
